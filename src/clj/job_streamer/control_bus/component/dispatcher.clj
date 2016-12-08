@@ -78,7 +78,13 @@
                                         :job-execution/batch-status
                                         :db/ident)
                                 :batch-status/undispatched)
-                   :parameters parameter}))
+                   :parameters parameter
+                   :test-mode? (some-> (d/pull datomic
+                                              '[:job-execution/test-mode]
+                                              execution-request)
+                                      :job-execution/test-mode?
+                                      ;;for backward compatibility
+                                      true?)}))
         (<! (timeout 2000))
         (put! submitter-ch :continue)
         (recur)))))

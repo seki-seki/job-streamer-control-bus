@@ -595,7 +595,7 @@
                                   (when-let [action (get-in time-monitor [:time-monitor/action :db/ident])]
                                     (assoc time-monitor :time-monitor/action action)))))))))
 
-(defn- execute-job [{:keys [datomic scheduler] :as jobs} app-name job-name ctx]
+(defn- execute-job [{:keys [datomic scheduler] :as jobs} app-name job-name {{{:keys [test-mode]} :params} :request :as ctx}]
   (when-let [[app-id job-id] (find-by-name jobs app-name job-name)]
     (let [execution-id (d/tempid :db.part/user)
           tempids (-> (d/transact
@@ -603,7 +603,8 @@
                        [{:db/id execution-id
                          :job-execution/batch-status :batch-status/undispatched
                          :job-execution/create-time (java.util.Date.)
-                         :job-execution/job-parameters (pr-str (or (:edn ctx) {}))}
+                         :job-execution/job-parameters (pr-str (or (:edn ctx) {}))
+                         :job-execution/test-mode? (and test-mode (true? (read-string test-mode)))}
                         [:db/add job-id :job/executions execution-id]])
                       :tempids)]
       (when-let [time-monitor (d/pull datomic
@@ -727,6 +728,81 @@
    :handle-ok (fn [ctx]
                 (find-execution jobs id))))
 
+(defn execution-resource [{:keys [agents scheduler datomic] :as jobs} id & [cmd]]
+  (liberator/resource
+   :available-media-types ["application/edn" "application/json"]
+   :allowed-methods [:get :put]
+   :malformed? #(parse-body %)
+   :exists? (fn [ctx]
+              (when-let [execution (d/pull datomic
+                                           '[:*
+                                             {:job-execution/agent
+                                              [:db/id :agent/instance-id]}]
+                                           id)]
+                (when-let [[app-id job-id] (d/query datomic
+                                                    '{:find [[?app ?job]]
+                                                      :in [$ ?eid]
+                                                      :where [[?job :job/executions ?eid]
+                                                              [?app :application/jobs ?job]]}
+                                                    id)]
+                  {:execution execution
+                   :app-id app-id
+                   :job-id job-id})))
+
+   :put! (fn [{parameters :edn execution :execution
+               job-id :job-id app-id :app-id}]
+           (case cmd
+             :abandon
+             (ag/abandon-execution
+              agents
+              execution
+              :on-success (fn [_]
+                            (ag/update-execution-by-id
+                             agents
+                             id
+                             :on-success (fn [response]
+                                           (save-execution jobs id response))
+                             :on-error (fn [error]
+                                         (log/error error)))))
+
+             :stop
+             (ag/stop-execution
+              agents
+              execution
+              :on-success (fn [_]
+                            (ag/update-execution-by-id
+                             agents
+                             id
+                             :on-success (fn [response]
+                                           (save-execution jobs id response)))))
+
+             :restart
+             (let [execution-id (d/tempid :db.part/user)
+                   tempids (-> (d/transact
+                                datomic
+                                [{:db/id execution-id
+                                  :job-execution/batch-status :batch-status/unrestarted
+                                  :job-execution/create-time (java.util.Date.)
+                                  :job-execution/agent (:job-execution/agent execution)
+                                  :job-execution/job-parameters (pr-str (or parameters {}))}
+                                 [:db/add job-id :job/executions execution-id]])
+                               :tempids)]
+               {:execution-id (d/resolve-tempid datomic tempids execution-id)})
+
+             :alert
+             (let [job (d/query datomic
+                                '{:find [(pull ?job [:job/name
+                                                     {:job/time-monitor
+                                                      [:time-monitor/notification-type]}]) .]
+                                  :in [$ ?id]
+                                  :where [[?job :job/executions ?id]]} id)]
+               (notification/send
+                (get-in job [:job/time-monitor :time-monitor/notification-type])
+                {:job-name (:job/name job)
+                 :duration (get-in job [:job/time-monitor :time-monitor/duration])}))
+             nil))
+   :handle-ok (fn [ctx]
+                (find-execution jobs id))))
 (defrecord Jobs []
   component/Lifecycle
 

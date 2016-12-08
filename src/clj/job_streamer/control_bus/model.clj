@@ -68,7 +68,8 @@
             [exit-status :string]
             [agent :ref]
             [execution-id :long]
-            [step-executions :ref :many]))
+            [step-executions :ref :many]
+            [test-mode? :boolean]))
    (schema step-execution
            (fields
             [step :ref]
